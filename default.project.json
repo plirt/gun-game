@@ -1,0 +1,10 @@
+{
+  "name": "GunGame",
+  "tree": {
+    "$className": "DataModel",
+    "ReplicatedStorage": { "$path": "ReplicatedStorage" },
+    "ServerScriptService": { "$path": "ServerScriptService" },
+    "ServerStorage": { "$path": "ServerStorage" },
+    "StarterPlayer": { "$path": "StarterPlayer" }
+  }
+}
