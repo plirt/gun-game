@@ -80,9 +80,18 @@ local function get_interval(ctx, speed: number): number
 	return WALK_INTERVAL + (SPRINT_INTERVAL - WALK_INTERVAL) * speed_alpha
 end
 
-local function get_horizontal_speed(root: BasePart): number
+local function get_character_motion(ctx, root: BasePart): (number, boolean)
+	local movement_state = ctx.movement_state
+	if movement_state and typeof(movement_state.motion_velocity) == "Vector3" then
+		local velocity = movement_state.motion_velocity
+		local horizontal_velocity = Vector3.new(velocity.X, 0, velocity.Z)
+		local direction = movement_state.predicted_move_direction
+		local moving = typeof(direction) == "Vector3" and direction.Magnitude > 0.05
+		return horizontal_velocity.Magnitude, moving
+	end
 	local velocity = root.AssemblyLinearVelocity
-	return Vector3.new(velocity.X, 0, velocity.Z).Magnitude
+	local horizontal_velocity = Vector3.new(velocity.X, 0, velocity.Z)
+	return horizontal_velocity.Magnitude, horizontal_velocity.Magnitude > MIN_MOVE_SPEED
 end
 
 local function get_sound_id(material: Enum.Material): string?
@@ -151,8 +160,8 @@ function footstep_controller.setup(ctx)
 			state.elapsed = 0
 			return
 		end
-		local speed = get_horizontal_speed(root)
-		if speed < MIN_MOVE_SPEED or humanoid.MoveDirection.Magnitude <= 0.05 then
+		local speed, moving = get_character_motion(ctx, root)
+		if speed < MIN_MOVE_SPEED or not moving then
 			state.elapsed = 0
 			return
 		end

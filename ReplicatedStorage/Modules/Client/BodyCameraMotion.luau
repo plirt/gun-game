@@ -1,4 +1,7 @@
 local Players = game:GetService("Players")
+local ReplicatedStorage = game:GetService("ReplicatedStorage")
+
+local MovementConfig = require(ReplicatedStorage.Modules.Shared.MovementConfig)
 
 local body_camera_motion = {}
 
@@ -50,7 +53,10 @@ function body_camera_motion.update(state, config, movement_state, camera_cframe,
 	local yaw_cframe = CFrame.Angles(0, state.body_camera_yaw, 0)
 	local offset = config.body_camera_mount_offset or Vector3.zero
 	local viewmodel_offset = config.body_camera_viewmodel_mount_offset or offset
-	local crouch_drop = movement_state and movement_state.crouching and (config.body_camera_crouch_drop or 0.9) or 0
+	local crouch_drop = movement_state
+		and movement_state.crouching
+		and (config.body_camera_crouch_drop or MovementConfig.BODY_CAMERA_CROUCH_DROP)
+		or 0
 	local height = (config.body_camera_base_height or 1.45) - crouch_drop
 	local target_position = root.Position
 		+ yaw_cframe.RightVector * offset.X

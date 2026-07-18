@@ -3,6 +3,7 @@ local RunService = game:GetService("RunService")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 
 local GunStateMachine = require(ReplicatedStorage.Modules.Client.GunStateMachine)
+local MovementConfig = require(ReplicatedStorage.Modules.Shared.MovementConfig)
 
 local gun_equip_controller = {}
 
@@ -156,7 +157,7 @@ function gun_equip_controller.finish_unequip(manager, deps)
 	local humanoid = movement_state and movement_state.humanoid
 	if humanoid and movement_state.base_camera_offset then
 		movement_state.body_camera_offset = Vector3.zero
-		local crouch_offset = movement_state.crouching and Vector3.new(0, -1.15, 0) or Vector3.zero
+		local crouch_offset = movement_state.crouching and MovementConfig.CROUCH_CAMERA_OFFSET or Vector3.zero
 		humanoid.CameraOffset = movement_state.base_camera_offset + crouch_offset
 	end
 	if manager.camera and manager.camera:GetAttribute("ActiveGunManager") == manager.active_camera_owner then

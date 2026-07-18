@@ -8,6 +8,7 @@ local GunFireController = require(ReplicatedStorage.Modules.Client.GunFireContro
 local GunMotionMath = require(ReplicatedStorage.Modules.Client.gun_motion_math)
 local GunMotionState = require(ReplicatedStorage.Modules.Client.GunMotionState)
 local GunReticleController = require(ReplicatedStorage.Modules.Client.GunReticleController)
+local MovementConfig = require(ReplicatedStorage.Modules.Shared.MovementConfig)
 local GunViewmodelMotion = require(ReplicatedStorage.Modules.Client.GunViewmodelMotion)
 
 local gun_frame_controller = {}
@@ -137,7 +138,7 @@ local function apply_body_camera_offset(self)
 	if not humanoid then
 		return
 	end
-	local crouch_offset = movement_state.crouching and Vector3.new(0, -1.15, 0) or Vector3.zero
+	local crouch_offset = movement_state.crouching and MovementConfig.CROUCH_CAMERA_OFFSET or Vector3.zero
 	humanoid.CameraOffset = (movement_state.base_camera_offset or Vector3.zero) + crouch_offset
 end
 

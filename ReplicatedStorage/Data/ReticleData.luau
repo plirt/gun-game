@@ -7,3 +7,4 @@ local reticle_data = {
 	}
 }
 return reticle_data
+

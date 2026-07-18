@@ -1,63 +1,32 @@
-local RunService = game:GetService("RunService")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
+local RunService = game:GetService("RunService")
 
 local MovementConfig = require(ReplicatedStorage.Modules.Shared.MovementConfig)
+local MovementSimulation = require(ReplicatedStorage.Modules.Shared.MovementSimulation)
 
 local movement_controller = {}
 
-local CROUCH_HIP_HEIGHT_OFFSET = -1.35
-local CROUCH_CAMERA_OFFSET = Vector3.new(0, -1.15, 0)
 local ACTION_CONTEXT_NAME = "MovementInputActions"
-
-type MovementState = {
-	humanoid: Humanoid?,
-	base_hip_height: number?,
-	base_camera_offset: Vector3?,
-	sprinting: boolean,
-	moving: boolean,
-	crouching: boolean,
-	last_sent_crouching: boolean,
-	last_sent_sprinting: boolean,
-	last_sent_aiming: boolean,
-	last_movement_sent_at: number,
-	movement_token: number,
-	body_camera_offset: Vector3,
-	sprint_action: InputAction?,
-}
+local MAX_PENDING_COMMANDS = 120
 
 local function menu_blocks_movement(ctx): boolean
 	return ctx.menu_open == true or ctx.shop_open == true or ctx.attachments_open == true
-end
-
-local function get_character_humanoid(player: Player): Humanoid?
-	local character = player.Character
-	if not character then
-		return nil
-	end
-	return character:FindFirstChildOfClass("Humanoid")
 end
 
 local function is_aiming(ctx): boolean
 	return ctx.active_gun ~= nil and ctx.active_gun.aiming == true
 end
 
-local function get_target_speed(ctx, state: MovementState): number
-	if menu_blocks_movement(ctx) then
-		return MovementConfig.BASE_WALK_SPEED
-	end
-	if state.crouching then
-		return is_aiming(ctx) and MovementConfig.ADS_CROUCH_SPEED or MovementConfig.CROUCH_SPEED
-	end
-	if is_aiming(ctx) then
-		return MovementConfig.ADS_SPEED
-	end
-	if state.sprinting then
-		return MovementConfig.SPRINT_SPEED
-	end
-	return MovementConfig.BASE_WALK_SPEED
+local function make_raycast_params(character: Model): RaycastParams
+	local params = RaycastParams.new()
+	params.FilterType = Enum.RaycastFilterType.Exclude
+	params.FilterDescendantsInstances = { character }
+	params.IgnoreWater = true
+	return params
 end
 
 local function apply_jump_lock(humanoid: Humanoid)
+	humanoid.WalkSpeed = 0
 	humanoid.Jump = false
 	humanoid:SetStateEnabled(Enum.HumanoidStateType.Jumping, false)
 	humanoid:SetStateEnabled(Enum.HumanoidStateType.Freefall, true)
@@ -65,34 +34,54 @@ local function apply_jump_lock(humanoid: Humanoid)
 	humanoid.JumpHeight = 0
 end
 
-local function apply_crouch_height(state: MovementState)
+local function apply_crouch_height(state)
 	local humanoid = state.humanoid
 	if not humanoid or not state.base_hip_height or not state.base_camera_offset then
 		return
 	end
-	humanoid.HipHeight = state.crouching and math.max(-1.25, state.base_hip_height + CROUCH_HIP_HEIGHT_OFFSET) or state.base_hip_height
-	local crouch_offset = state.crouching and CROUCH_CAMERA_OFFSET or Vector3.zero
+	humanoid.HipHeight = state.crouching
+		and state.base_hip_height + MovementConfig.CROUCH_HIP_HEIGHT_OFFSET
+		or state.base_hip_height
+	local crouch_offset = state.crouching and MovementConfig.CROUCH_CAMERA_OFFSET or Vector3.zero
 	humanoid.CameraOffset = state.base_camera_offset + crouch_offset + (state.body_camera_offset or Vector3.zero)
 end
 
-local function refresh_character(ctx, state: MovementState)
-	local humanoid = get_character_humanoid(ctx.player)
-	if humanoid == state.humanoid then
+local function reset_prediction(state)
+	state.generation = nil
+	state.next_sequence = 0
+	state.acknowledged_sequence = 0
+	state.pending_commands = {}
+	state.simulation_accumulator = 0
+	state.last_reconciliation_error = 0
+	state.predicted_velocity = Vector3.zero
+	state.predicted_move_direction = Vector3.zero
+	state.motion_velocity = Vector3.zero
+end
+
+local function refresh_character(ctx, state)
+	local character = ctx.player.Character
+	local humanoid = character and character:FindFirstChildOfClass("Humanoid")
+	local root = character and character:FindFirstChild("HumanoidRootPart")
+	if humanoid == state.humanoid and root == state.root then
 		return
 	end
+	state.character = character
 	state.humanoid = humanoid
+	state.root = root and root:IsA("BasePart") and root or nil
+	state.raycast_params = character and make_raycast_params(character) or nil
 	state.base_hip_height = humanoid and math.max(0, humanoid.HipHeight) or nil
 	state.base_camera_offset = humanoid and humanoid.CameraOffset or nil
 	state.sprinting = false
 	state.moving = false
 	state.crouching = false
+	reset_prediction(state)
 	if humanoid then
 		apply_jump_lock(humanoid)
 		apply_crouch_height(state)
 	end
 end
 
-local function set_crouching(ctx, state: MovementState, enabled: boolean)
+local function set_crouching(ctx, state, enabled: boolean)
 	if menu_blocks_movement(ctx) then
 		enabled = false
 	end
@@ -103,33 +92,12 @@ local function set_crouching(ctx, state: MovementState, enabled: boolean)
 	apply_crouch_height(state)
 end
 
-local function set_sprinting(ctx, state: MovementState, enabled: boolean)
+local function set_sprinting(ctx, state, enabled: boolean)
 	if state.crouching then
 		state.sprinting = false
 		return
 	end
 	state.sprinting = enabled and not is_aiming(ctx) and not menu_blocks_movement(ctx)
-end
-
-local function send_movement_state(ctx, state: MovementState, force: boolean)
-	local remote = ctx.remotes:FindFirstChild("MovementState")
-	if not remote then
-		return
-	end
-	local now = os.clock()
-	local aiming = is_aiming(ctx)
-	local changed = state.crouching ~= state.last_sent_crouching
-		or state.sprinting ~= state.last_sent_sprinting
-		or aiming ~= state.last_sent_aiming
-	if not force and (not changed or now - state.last_movement_sent_at < 0.08) then
-		return
-	end
-	state.last_sent_crouching = state.crouching
-	state.last_sent_sprinting = state.sprinting
-	state.last_sent_aiming = aiming
-	state.last_movement_sent_at = now
-	state.movement_token += 1
-	remote:FireServer(state.movement_token, state.crouching, state.sprinting, aiming)
 end
 
 local function get_action_context()
@@ -155,13 +123,9 @@ local function create_action(context: InputContext, name: string, key_codes, pre
 		binding.KeyCode = key_code
 		binding.Parent = action
 	end
-	action.Pressed:Connect(function()
-		pressed()
-	end)
+	action.Pressed:Connect(pressed)
 	if released then
-		action.Released:Connect(function()
-			released()
-		end)
+		action.Released:Connect(released)
 	end
 	action.Parent = context
 	return action
@@ -177,83 +141,195 @@ local function get_action_state(action: InputAction?): boolean
 	return ok and value == true
 end
 
-
-local function bind_movement_actions(ctx, state: MovementState)
+local function bind_movement_actions(ctx, state)
 	local context = get_action_context()
-	state.sprint_action = create_action(context, "Sprint", { Enum.KeyCode.LeftShift, Enum.KeyCode.RightShift }, function()
+	state.sprint_action = create_action(context, "Sprint", {
+		Enum.KeyCode.LeftShift,
+		Enum.KeyCode.RightShift,
+	}, function()
 		set_sprinting(ctx, state, true)
-		send_movement_state(ctx, state, true)
 	end, function()
 		state.sprinting = false
-		send_movement_state(ctx, state, true)
 	end)
 	create_action(context, "Crouch", { Enum.KeyCode.C }, function()
-		if ctx.UserInputService:GetFocusedTextBox() then
-			return
+		if not ctx.UserInputService:GetFocusedTextBox() then
+			set_crouching(ctx, state, not state.crouching)
 		end
-		set_crouching(ctx, state, not state.crouching)
-		send_movement_state(ctx, state, true)
 	end)
 end
 
+local function apply_command(state, command)
+	local root = state.root
+	if not root or not state.raycast_params then
+		return
+	end
+	local speed = MovementConfig.get_speed(command.crouching, command.sprinting, command.aiming)
+	local previous_position = root.Position
+	local next_cframe = MovementSimulation.step(
+		root.CFrame,
+		root.Size,
+		command.move_direction,
+		command.delta_time,
+		speed,
+		state.raycast_params
+	)
+	root.CFrame = next_cframe
+
+	local displacement = next_cframe.Position - previous_position
+	local horizontal_displacement = Vector3.new(displacement.X, 0, displacement.Z)
+	state.predicted_velocity = command.delta_time > 0
+		and horizontal_displacement / command.delta_time
+		or Vector3.zero
+	state.predicted_move_direction = command.move_direction.Magnitude > 0.05
+		and command.move_direction.Unit
+		or Vector3.zero
+end
+
+local function discard_acknowledged_commands(state, acknowledged_sequence)
+	local remaining = {}
+	for _, command in ipairs(state.pending_commands) do
+		if command.sequence > acknowledged_sequence then
+			table.insert(remaining, command)
+		end
+	end
+	state.pending_commands = remaining
+end
+
+local function reconcile_snapshot(state, payload)
+	if typeof(payload.cframe) ~= "CFrame"
+		or type(payload.acknowledged_sequence) ~= "number"
+		or type(payload.generation) ~= "string"
+	then
+		return
+	end
+	local root = state.root
+	if not root then
+		return
+	end
+	if state.generation and payload.generation ~= state.generation then
+		reset_prediction(state)
+	end
+	state.generation = payload.generation
+	state.next_sequence = math.max(state.next_sequence, payload.acknowledged_sequence)
+	if payload.acknowledged_sequence < state.acknowledged_sequence then
+		return
+	end
+	state.acknowledged_sequence = payload.acknowledged_sequence
+	discard_acknowledged_commands(state, payload.acknowledged_sequence)
+
+	local predicted_before = root.Position
+	root.CFrame = payload.cframe
+	for _, command in ipairs(state.pending_commands) do
+		apply_command(state, command)
+	end
+	state.last_reconciliation_error = (predicted_before - root.Position).Magnitude
+end
+
+local function build_command(ctx, state, delta_time)
+	local humanoid = state.humanoid
+	local move_direction = humanoid and humanoid.MoveDirection or Vector3.zero
+	if menu_blocks_movement(ctx) then
+		move_direction = Vector3.zero
+		state.sprinting = false
+	end
+	local aiming = is_aiming(ctx)
+	if state.crouching or aiming then
+		state.sprinting = false
+	end
+	state.next_sequence += 1
+	return {
+		sequence = state.next_sequence,
+		delta_time = delta_time,
+		move_direction = Vector3.new(move_direction.X, 0, move_direction.Z),
+		crouching = state.crouching,
+		sprinting = state.sprinting,
+		aiming = aiming,
+	}
+end
+
+local function predict_and_send(ctx, state, command_remote, delta_time)
+	local command = build_command(ctx, state, delta_time)
+	apply_command(state, command)
+	table.insert(state.pending_commands, command)
+	if #state.pending_commands > MAX_PENDING_COMMANDS then
+		table.remove(state.pending_commands, 1)
+	end
+	command_remote:FireServer(
+		command.sequence,
+		command.delta_time,
+		command.move_direction,
+		command.crouching,
+		command.sprinting,
+		command.aiming
+	)
+end
+
 function movement_controller.setup(ctx)
-	local state: MovementState = {
+	local state = {
+		character = nil,
 		humanoid = nil,
+		root = nil,
+		raycast_params = nil,
 		base_hip_height = nil,
 		base_camera_offset = nil,
 		sprinting = false,
 		moving = false,
 		crouching = false,
-		last_sent_crouching = false,
-		last_sent_sprinting = false,
-		last_sent_aiming = false,
-		last_movement_sent_at = 0,
-		movement_token = 0,
 		body_camera_offset = Vector3.zero,
 		sprint_action = nil,
+		generation = nil,
+		next_sequence = 0,
+		acknowledged_sequence = 0,
+		pending_commands = {},
+		simulation_accumulator = 0,
+		last_reconciliation_error = 0,
+		predicted_velocity = Vector3.zero,
+		predicted_move_direction = Vector3.zero,
+		motion_velocity = Vector3.zero,
 	}
-
 	ctx.movement_state = state
 	for _, manager in ctx.managers do
 		manager.movement_state = state
 	end
 
-	bind_movement_actions(ctx, state)
-
-	ctx.player.CharacterAdded:Connect(function()
-		task.defer(function()
-			refresh_character(ctx, state)
-			send_movement_state(ctx, state, true)
-		end)
+	local command_remote = ctx.remotes:WaitForChild("MovementCommand")
+	local snapshot_remote = ctx.remotes:WaitForChild("MovementSnapshot")
+	snapshot_remote.OnClientEvent:Connect(function(payload)
+		if type(payload) == "table" then
+			reconcile_snapshot(state, payload)
+		end
 	end)
 
+	bind_movement_actions(ctx, state)
+	ctx.player.CharacterAdded:Connect(function()
+		task.defer(refresh_character, ctx, state)
+	end)
 	refresh_character(ctx, state)
-	send_movement_state(ctx, state, true)
 
 	RunService:BindToRenderStep("PvPMovementController", Enum.RenderPriority.Camera.Value + 1, function(delta_time)
 		refresh_character(ctx, state)
-
 		local humanoid = state.humanoid
-		if humanoid then
-			apply_jump_lock(humanoid)
-			state.moving = humanoid.MoveDirection.Magnitude > 0.05
-			set_sprinting(ctx, state, get_action_state(state.sprint_action))
-			if state.crouching then
-				state.sprinting = false
-			end
-			if is_aiming(ctx) then
-				state.sprinting = false
-			end
-			if menu_blocks_movement(ctx) then
-				state.sprinting = false
-			end
-			humanoid.WalkSpeed = get_target_speed(ctx, state)
-		else
+		if not humanoid then
 			state.moving = false
+			return
+		end
+		apply_jump_lock(humanoid)
+		set_sprinting(ctx, state, get_action_state(state.sprint_action))
+		state.moving = humanoid.MoveDirection.Magnitude > 0.05 and not menu_blocks_movement(ctx)
+		humanoid:Move(humanoid.MoveDirection, false)
+
+		state.simulation_accumulator += math.min(delta_time, 0.1)
+		local step = MovementConfig.COMMAND_STEP
+		while state.simulation_accumulator >= step do
+			state.simulation_accumulator -= step
+			predict_and_send(ctx, state, command_remote, step)
 		end
 
-		send_movement_state(ctx, state, false)
-
+		local motion_alpha = 1 - math.exp(-delta_time * 14)
+		state.motion_velocity = state.motion_velocity:Lerp(state.predicted_velocity, motion_alpha)
+		if state.predicted_velocity.Magnitude <= 0.05 and state.motion_velocity.Magnitude < 0.01 then
+			state.motion_velocity = Vector3.zero
+		end
 	end)
 end
 
